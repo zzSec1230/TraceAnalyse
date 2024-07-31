@@ -1,1 +1,4 @@
-version2
+Function	test(){
+	int a = b+2;
+	return b = 0;
+}
