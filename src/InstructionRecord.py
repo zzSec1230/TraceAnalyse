@@ -42,23 +42,43 @@ class InstructionRecord:
         recordObject = json.loads(record)
         self.record = recordObject
         self.context = self.record["context"]
+
+    # 需要处理w寄存器
     def getRegValue(self,regName):
         return self.context[regName]
     def setRegValue(self, regName, value):
         self.context[regName] = value
 
+    @property
     def address(self):
         return self.record["address"]
     #
     # Deduplication by default
+    @property
     def regsAccessed(self) -> list:
         regsAccessed = set()
         regsAccessed.add(self.record["regsAccessed"]["read"])
         regsAccessed.add(self.record["regsAccessed"]["written"])
         return list(regsAccessed)
 
+    @property
+    def readRegs(self):
+        return self.record["regsAccessed"]["read"]
+
+    @property
+    def writtenRegs(self):
+        return self.record["regsAccessed"]["written"]
+
+    @property
     def mnemonic(self):
         return self.record["mnemonic"]
 
+    @property
     def operands(self):
         return self.record["operands"]
+
+    @property
+    def opStr(self):
+        return self.record["opStr"]
+
+    def getReadRegsAndValue(self):

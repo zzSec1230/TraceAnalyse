@@ -6,6 +6,9 @@ class AnalyseEngine:
     def LoadDumpFile(self, path: str) -> TraceSnapshot:
         with open(path,'r') as file:
             lines = file.readlines()
-            return TraceSnapshot(lines)
+            return TraceSnapshot(self,lines)
     def show(self, trace: TraceSnapshot):
-        pass
+        trace.show()
+
+    def getSymbolFromAddress(self,address: str):
+        return None
