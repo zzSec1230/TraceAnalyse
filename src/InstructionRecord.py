@@ -38,16 +38,27 @@ class InstructionContext:
         pass
 
 class InstructionRecord:
-    def __init__(self,record: str):
+    def __init__(self,record: str,prev_record):
         recordObject = json.loads(record)
         self.record = recordObject
         self.context = self.record["context"]
+        self.extra = None
+        if "extra" in self.record:
+            self.extra = self.record["extra"]
+
+        self.prev_record = prev_record
 
     # 需要处理w寄存器
-    def getRegValue(self,regName):
+    def getRegValue(self,regName: str) -> str:
+        if 'w' in regName:
+            return hex(int(self.context[regName.replace('w','x')],16) & 0xffffffff)
         return self.context[regName]
-    def setRegValue(self, regName, value):
-        self.context[regName] = value
+    def setRegValue(self, regName: str, value: int):
+        if 'w' in regName:
+            old_value = int(self.context[regName.replace('w','x')],16)
+            new_value = ((old_value >> 32) <<32) | value
+            self.context[regName] = hex(new_value)
+        self.context[regName] = hex(value)
 
     @property
     def address(self):
@@ -81,4 +92,27 @@ class InstructionRecord:
     def opStr(self):
         return self.record["opStr"]
 
+    @property
+    def symbol(self):
+        if self.extra is not None:
+            return self.extra["symbol"]["name"]
+        return None
+    # 因为当前的context是指令已经执行结束后得到的，所以假如指令是这种add x8,x8,2 那么此时得到的
+    # x8寄存器的值就已经是计算后的值了
+    # 所以需要改成从prev_record中获取
     def getReadRegsAndValue(self):
+        readRegs = self.readRegs
+        reg_dict = {}
+        if self.prev_record is not None:
+            for reg in readRegs:
+                reg_dict[reg] = self.prev_record.getRegValue(reg)
+        return reg_dict
+
+    def getWriteRegsAndValue(self):
+        writeRegs = self.writtenRegs
+        reg_dict = {}
+        for reg in writeRegs:
+            reg_dict[reg] = self.getRegValue(reg)
+        return reg_dict
+
+

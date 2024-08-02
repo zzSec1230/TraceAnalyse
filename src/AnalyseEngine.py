@@ -1,4 +1,7 @@
-from TraceSnapshot import *
+
+from .TraceSnapshot import TraceSnapshot
+
+
 class AnalyseEngine:
     def __init__(self):
         pass
@@ -7,7 +10,7 @@ class AnalyseEngine:
         with open(path,'r') as file:
             lines = file.readlines()
             return TraceSnapshot(self,lines)
-    def show(self, trace: TraceSnapshot):
+    def show(self, trace: TraceSnapshot, output_path: str):
         trace.show()
 
     def getSymbolFromAddress(self,address: str):

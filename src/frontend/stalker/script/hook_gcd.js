@@ -88,27 +88,27 @@ function my_stalkerTraceRange(module_start, module_end) {
                                 //处理跳转指令
                                 instruction_json_object = JSON.parse(JSON.stringify(nextInstruction));
                                 instruction_json_object["context"] = context;
-                                var symbol = DebugSymbol.fromAddress(nextInstruction["operands"][""]);
+                                var symbol = DebugSymbol.fromAddress(ptr(nextInstruction["operands"][0]["value"]));
                                 instruction_json_object["extra"] = {"symbol":symbol}
                                 console.log(JSON.stringify(instruction_json_object));
                             }
 
-                            
+
 
                         }
                     });
                 }
-                
+
             } while ((instruction = iterator.next()) !== null);
         }
-    }); 
+    });
 }
 
 function testTrace(){
         // hook_dispatch_async.js
         var GCDModule = Process.getModuleByName("GCDRev");
         console.log("GCDModule Base is :",GCDModule.base);
-
+        console.log(JSON.stringify({"modulebase":GCDModule.base}));
         var module_start = GCDModule.base.add(0x4054);
         var module_end = GCDModule.base.add(0x40F8);
         if (ObjC.available) {
