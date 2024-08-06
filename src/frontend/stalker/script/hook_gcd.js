@@ -92,9 +92,6 @@ function my_stalkerTraceRange(module_start, module_end) {
                                 instruction_json_object["extra"] = {"symbol":symbol}
                                 console.log(JSON.stringify(instruction_json_object));
                             }
-
-
-
                         }
                     });
                 }
