@@ -1,11 +1,14 @@
 import dataclasses
 import os
-
+from capstone import *
 import lief
 from typing import List, Optional
 from enum import Enum
 from typing import Dict, List, Tuple, Optional
 
+import utils.FileUtil
+from utils.DebugUtil import dbg_print
+from utils.DisamUtil import get_mem_disp
 from utils.const import MODULE_ADDRESS
 from utils.utils import aligned
 from lief.MachO import ARM64_RELOCATION
@@ -50,10 +53,14 @@ class Module:
     def get_segment_vmaddrs(self):
         segment_addresses = [t.virtual_address for t in self.binary.segments]
         return segment_addresses
+    def getSymbolFromAddress(self, address):
+        for symbol in self.symbols:
+            if symbol.address == address:
+                return symbol
 
 
 class MachoLoader():
-
+    #装在MachO文件
     def load(
         self,
         module_file: str,
@@ -64,78 +71,99 @@ class MachoLoader():
         """Load Mach-O executable file from path."""
         module_name = os.path.basename(module_file)
         # 后续
-        binary: lief.MachO.Binary = lief.parse(module_file)
-        segment_addresses = [t.virtual_address for t in binary.segments]
-        #image base是MachO文件准备load到的内存地址
+        self.binary: lief.MachO.Binary = lief.parse(module_file)
+        self.machofile : utils.FileUtil.MachoFile = utils.FileUtil.MachoFile(module_file)
+        segment_addresses = [t.virtual_address for t in self.binary.segments]
+        #image base是MachO文件准备load到的内存地址，取所有segment要加载的最小值
         image_base = aligned(min(segment_addresses), 1024)
-        #计算和指定的加载地址之间的偏移
+        #计算和指定的加载地址之间的偏移 即slide
+        #如果module_base给的是0 那么就按image_base加载
+        if module_base == 0:
+            module_base = image_base
         module_base_offset = module_base - image_base
-        size = self._map_segments(binary, module_base_offset)
+        self.slide = module_base_offset
+        size = self._map_segments(self.binary, module_base_offset)
         #获得所有的符号信息
-        symbols = self._load_symbols(binary, module_base)
-        lazy_bindings = self._process_relocation(binary, module_base, symbols)
-        init_array = self._get_init_array(binary, module_base)
+        self.symbols = self._load_symbols(self.binary, module_base)
+
+        # 获取Stubs的映射表
+        stubsMap  = self._getStubsMap()
+        #lazy_bindings = self._process_relocation(binary, module_base, symbols)
+        #init_array = self._get_init_array(binary, module_base)
         return Module(
             base=module_base + image_base,
             size=size - image_base,
             name=module_name,
-            symbols=symbols,
-            init_array=init_array,
+            symbols=self.symbols,
+            init_array=None,
             image_base=image_base,
-            lazy_bindings=lazy_bindings,
-            binary=binary,
+            lazy_bindings=None,
+            binary=self.binary,
         )
+    def _getStubsMap(self):
+        #先得到Stubs的section
+        stubs_section = self.binary.get_section("__stubs")
+        #先建立Stubs到其跳转地址的映射表
+        # 获取stubs_section的起始地址
+        stubs_section_start = stubs_section.virtual_address + self.slide
+        stubs_map = {}
+        if stubs_section is not None:
+            code = bytearray(stubs_section.content)
+            cs = Cs(CS_ARCH_ARM64, CS_MODE_ARM)  # 根据实际架构选择
+            cs.detail = True
+            # 反汇编并输出指令
+            adrp_value = None
+            ins_count = 0
+            final_address = None
+            instruction_address = None
+            for instruction in cs.disasm(code, stubs_section_start):
+                ins_count += 1
+                if instruction.mnemonic == "adrp":
+                    # 计算基地址
+                    adrp_value = (instruction.operands[1].imm & 0xFFFFFFFFF000)
+                    instruction_address = instruction.address
+                elif instruction.mnemonic == "ldr" and adrp_value is not None:
+                    pass
+                    # 计算最终地址
+                    offset = get_mem_disp(instruction.op_str)
+                    final_address = adrp_value + offset
+                print(f"0x{instruction.address:x}:\t{instruction.mnemonic}\t{instruction.op_str}")
+                #三组指令记一个Stubs
+                if ins_count%3 == 0:
+                    stubs_map[instruction_address] = final_address
+        else:
+            print("Stubs section not found")
+        # 获取got section 和 la_symbol_ptr
+        got_section = self.binary.get_section("__got")
+        got_reserved1 = got_section.reserved1
+        got_section_vaddr = got_section.virtual_address
+        got_section_size = got_section.size
+        la_ptr_section = self.binary.get_section("__la_symbol_ptr")
+        la_reserved1 = la_ptr_section.reserved1
+        la_section_vaddr = la_ptr_section.virtual_address
+        la_section_size = la_ptr_section.size
+        indirect_symbol_offset = self.binary.dynamic_symbol_command.indirect_symbol_offset
+        indirect_symbol_nb = self.binary.dynamic_symbol_command.nb_indirect_symbols
+        indirect_symbol_data = self.machofile.read_values(indirect_symbol_offset,4,indirect_symbol_nb)
+        dbg_print(indirect_symbol_data)
+        for (key,value) in stubs_map.items():
+            got_section_offset = value - got_section_vaddr
+            la_section_offset = value - la_section_vaddr
+            if got_section_offset >= 0 and got_section_offset < got_section_size:
+                symbol_index = indirect_symbol_data[int(got_section_offset/8) + got_reserved1]
+            elif la_section_offset >= 0 and la_section_offset < la_section_size:
+                symbol_index = indirect_symbol_data[int(la_section_offset/8) + la_reserved1]
+            else:
+                symbol_index = -1
+            # 重新桥接
+            if symbol_index == -1:
+                stubs_map[key] = None
+            else:
+                stubs_map[key] = self.symbols[symbol_index].name
+        dbg_print(stubs_map)
 
-    def _get_init_array(self, binary: lief.MachO.Binary, module_base: int):
-        """Get initialization functions in section `__mod_init_func`."""
-        section = binary.get_section("__mod_init_func")
-        if not section:
-            return []
 
-        begin = module_base + section.virtual_address
-        end = begin + section.size
-        #values = self.emu.read_array(begin, end)
 
-        return [addr for addr in values if addr]
-
-    #处理重定位
-    def _process_relocation(
-        self,
-        binary: lief.MachO.Binary,
-        module_base: int,
-        symbols: List[Symbol],
-    ):
-        """Process relocations base on relocation table and symbol references."""
-        blocks: List[Tuple[int, int]] = []
-
-        begin = None
-        end = None
-
-        # Merge relocation records into blocks
-        for segment in binary.segments:
-            for relocation in segment.relocations:
-                if relocation.type != ARM64_RELOCATION.SUBTRACTOR:
-                    continue
-
-                address = module_base + relocation.address
-
-                if not begin:
-                    begin = address
-
-                if end and address != end:
-                    blocks.append((begin, end))
-                    begin = address
-
-                end = address + self.emu.arch.addr_size
-
-        # Read and write as blocks
-        for begin, end in blocks:
-            values = self.emu.read_array(begin, end)
-            values = map(lambda v: module_base + v, values)
-
-            self.emu.write_array(begin, values)
-
-        return self._process_symbol_relocation(binary, module_base, symbols)
 
     def _map_segments(self, binary: lief.MachO.Binary, module_base_offset: int) -> int:
         """Map all segments into memory."""
@@ -146,8 +174,9 @@ class MachoLoader():
                 continue
             #修正segment的加载地址
             seg_addr = module_base_offset + segment.virtual_address
-            #对其加载地址
+            #segment的加载地址对齐
             map_addr = aligned(seg_addr, 1024) - (1024 if seg_addr % 1024 else 0)
+            #大小对齐
             map_size = aligned(seg_addr - map_addr + segment.virtual_size, 1024)
 
             # self.emu.uc.mem_map(map_addr, map_size)
@@ -155,10 +184,10 @@ class MachoLoader():
             #     seg_addr,
             #     bytes(segment.content),
             # )
-
+            # 计算最后一个segment被加载到内存中的地方
             boundary = max(boundary, map_addr + map_size)
-
-        return boundary - module_base
+        # 最后一个segment的末尾 - 加载起始地址就是大小
+        return boundary - module_base_offset
     def get_lazy_bindings(self):
         return ["test"]
     def _load_symbols(
@@ -169,35 +198,20 @@ class MachoLoader():
         """Get all symbols in the module."""
         symbols = []
 
-        lazy_bindings = self.get_lazy_bindings()
-        lazy_binding_set = set()
         # 遍历symbol table
         for symbol in binary.symbols:
             if symbol.value:
                 symbol_name = str(symbol.name)
-                symbol_address = module_base_offset + symbol.value
-
-                # binding_name = symbol_name.replace("$VARIANT$armv81", "")
-
-                # Lazy bind 处理Lazy bind的逻辑，暂时不管
-                # if lazy_bindings.get(binding_name):
-                #     # Avoid duplicate bind for special case like xx$VARIANT$armv81
-                #     if binding_name in lazy_binding_set and binding_name == symbol_name:
-                #         continue
-                #
-                #     for module, binding in lazy_bindings[binding_name]:
-                #         reloc_addr = symbol_address
-                #
-                #         if reloc_addr:
-                #             addr = module.base - module.image_base + binding.address
-                #
-                #             value = reloc_addr + binding.addend
-                #             value &= 0xFFFFFFFFFFFFFFFF
-                #
-                #             #self.emu.write_pointer(addr, value)
-                #
-                #     lazy_binding_set.add(binding_name)
-
+                # 加上偏移
+                symbol_address = self.slide + symbol.value
+                symbol_struct = Symbol(
+                    address=symbol_address,
+                    name=symbol_name,
+                )
+                symbols.append(symbol_struct)
+            else:
+                symbol_name = str(symbol.name)
+                symbol_address = symbol.value
                 symbol_struct = Symbol(
                     address=symbol_address,
                     name=symbol_name,
